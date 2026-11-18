@@ -40,8 +40,8 @@ def estimate_equity(hole_cards, community_cards=(), opponents=1, trials=1400):
     board = _normalize_cards(community_cards, expected_min=0, expected_max=5)
     if len(set(hole + board)) != len(hole) + len(board):
         raise ValueError("내 카드와 커뮤니티 카드가 중복되었습니다.")
-    if not isinstance(opponents, int) or not 1 <= opponents <= 8:
-        raise ValueError("상대 플레이어 수는 1~8명이어야 합니다.")
+    if not isinstance(opponents, int) or not 1 <= opponents <= 9:
+        raise ValueError("상대 플레이어 수는 1~9명이어야 합니다.")
     if len(board) + 2 * opponents > 50:
         raise ValueError("상대 플레이어 수가 너무 많습니다.")
     if not isinstance(trials, int) or trials < 1:

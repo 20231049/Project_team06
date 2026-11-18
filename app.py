@@ -4,10 +4,6 @@ from pathlib import Path
 import streamlit as st
 from poker_equity_web import estimate_equity, evaluate_visible_hand, get_hand_features, get_recommendation
 
-# ------------------------------------------------------------
-# Poker Simulator - Visualization UI
-# 수정 범위: app.py만 수정. 기존 poker_equity.py 등은 변경하지 않습니다.
-# ------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent
 ASSET_DIR = ROOT / "assets"
@@ -94,7 +90,7 @@ if "opponents" not in st.session_state:
 
 # -------------------- 헤더 --------------------
 st.markdown("# ♠ Poker Simulator (승률 계산기)")
-st.markdown('<div class="subtitle">텍사스 홀덤 내 패와 커뮤니티 카드의 승리 확률 및 추천 행동을 시각화합니다.</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">텍사스 홀덤 내 패와 커뮤니티 카드의 승리 확률 및 추천 행동을 보여줍니다.</div>', unsafe_allow_html=True)
 st.markdown("---")
 
 left, right = st.columns([0.88, 1.12], gap="large")
@@ -103,14 +99,15 @@ with left:
     st.markdown('<div class="section-title">📷 카드 사진 (YOLO 인식 영역)</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="hint">💡 <b>카드 이미지 업로드</b><br>'
-        '카드 사진을 업로드할 수 있습니다. 현재 배포본은 화면 및 승률 시뮬레이션을 제공하며, '
+        '카드 사진을 업로드할 수 있습니다. 현재 배포본은 화면 및 승률 시뮬레이션만을 제공하며, '
         'YOLO 모델 가중치(best.pt)가 연결되면 자동 카드 인식 기능을 연동할 수 있습니다.</div>',
         unsafe_allow_html=True,
     )
     uploaded = st.file_uploader(
-        "카드 사진 업로드 / 웹캠 이미지",
+         "카드 사진 업로드",
         type=["png", "jpg", "jpeg"],
-        label_visibility="collapsed",
+        accept_multiple_files=False,
+        key="card_photo_upload"
     )
     if uploaded is not None:
         st.image(uploaded, caption="업로드한 카드 사진", use_container_width=True)
@@ -118,7 +115,7 @@ with left:
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="section-title">🎴 시뮬레이션 설정</div>', unsafe_allow_html=True)
-    opponents = st.slider("상대 플레이어 수", min_value=1, max_value=8, value=int(st.session_state.opponents))
+    opponents = st.slider("상대 플레이어 수", min_value=1, max_value=9, value=int(st.session_state.opponents))
     st.session_state.opponents = opponents
     st.caption("상대방의 카드는 알 수 없으므로 남은 카드에서 무작위로 생성합니다.")
 
