@@ -1,4 +1,3 @@
-
 @echo off
 setlocal
 title Poker Simulator
@@ -10,15 +9,15 @@ echo          POKER SIMULATOR START
 echo ========================================
 echo.
 
-where py >nul 2>&1
-if errorlevel 1 goto USE_PYTHON
+set "ANACONDA_PY=C:\Users\user\anaconda3\python.exe"
 
-echo Python Launcher found.
+if not exist "%ANACONDA_PY%" goto USE_PYTHON
+
+echo Using Anaconda Python: %ANACONDA_PY%
 echo.
 
 echo Installing required libraries...
-py -3 -m pip install --disable-pip-version-check streamlit pillow opencv-python ultralytics numpy
-
+"%ANACONDA_PY%" -m pip install --disable-pip-version-check streamlit pillow opencv-python ultralytics "numpy<2.0"
 if errorlevel 1 goto ERROR
 
 echo.
@@ -27,14 +26,14 @@ echo       STARTING POKER SIMULATOR
 echo ========================================
 echo.
 
-py -3 -m streamlit run "%~dp0Final_project.py" --server.address 127.0.0.1 --server.port 8501
+"%ANACONDA_PY%" -m streamlit run "%~dp0Final_project.py" --server.address 127.0.0.1 --server.port 8501
 
 goto END
 
 
 :USE_PYTHON
 
-echo Python Launcher not found.
+echo Anaconda Python not found.
 echo Trying python command...
 echo.
 
@@ -79,4 +78,3 @@ echo       SERVER PROCESS ENDED
 echo ========================================
 echo.
 pause
-
