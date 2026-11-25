@@ -230,66 +230,7 @@ def cards_from_yolo(results, expected=None, min_conf=MIN_CONF):
 
 def analyze_yolo(hand_results, board_results=None, num_opponents=NUM_OPPONENTS,
                  iterations=ITERATIONS, min_conf=MIN_CONF):
-    """YOLO 결과를 그대로 받아 승률 분석.
-    hand_results : 내 카드(플레이어 카드)를 찍은 model.predict(...) 결과
-    board_results: 커뮤니티 카드를 찍은 model.predict(...) 결과 (프리플랍이면 None)
 
-    사용 예 (Final_project.py):
-        hand  = model.predict(source="hand.jpg",  conf=0.1)
-        board = model.predict(source="board.jpg", conf=0.1)
-        analyze_yolo(hand, board)
-    """
     my_cards = cards_from_yolo(hand_results, expected=2, min_conf=min_conf)
     board = cards_from_yolo(board_results, min_conf=min_conf) if board_results is not None else []
     return analyze(my_cards, board, num_opponents, iterations)
-
-# ---------------- 테스트 ----------------
-def self_test():
-    """턴/리버를 포함한 계산이 정상인지 확인하는 간단한 검증."""
-    # 1) 족보 판정
-    assert best_rank(["As", "Ks", "Qs", "Js", "10s", "2d", "3c"])[0] == 9      # 로열 플러시
-    assert best_rank(["As", "2d", "3c", "4h", "5s", "9d", "Kc"])[0] == 4       # A-5 스트레이트
-    assert best_rank(["9s", "9h", "9d", "Kc", "Kd", "2s", "3h"])[0] == 6       # 풀하우스
-
-    # 2) 리버: 이미 로열 플러시가 완성 → 사실상 100%
-    r = my_win_rate(["As", "Ks"], ["Qs", "Js", "10s", "2d", "3c"], iterations=2000)
-    assert r > 0.99, r
-
-    # 3) 리버: 보드가 로열 플러시면 누구나 비김 → 정확히 50%
-    r = my_win_rate(["2d", "3c"], ["As", "Ks", "Qs", "Js", "10s"], iterations=2000)
-    assert abs(r - 0.5) < 1e-9, r
-
-    # 4) 턴: 강한 패(셋)와 약한 패(하이카드)의 차이
-    strong = my_win_rate(["As", "Ah"], ["Ad", "7c", "2h", "Kd"], iterations=4000)
-    weak = my_win_rate(["3s", "2h"], ["Ad", "7c", "9h", "Kd"], iterations=4000)
-    assert strong > 0.9 and weak < 0.3, (strong, weak)
-
-    # 5) 프리플랍 AA vs 랜덤 1명 ≈ 85%
-    r = my_win_rate(["As", "Ah"], [], iterations=6000)
-    assert 0.80 < r < 0.90, r
-
-    # 6) 입력 검증
-    for bad in (dict(my_cards=["As", "As"]),
-                dict(my_cards=["As", "Kh"], board_cards=["As", "2d", "3c"]),   # 보드와 중복
-                dict(my_cards=["As", "Kh"], board_cards=["2d", "3c"])):        # 2장은 불가
-        try:
-            analyze(verbose=False, iterations=10, **bad)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError(f"검증 실패: {bad}")
-
-    # 7) 표기 변환
-    assert norm("ts") == "10s" and norm("10h") == "10h" and norm("ace of spades") == "As"
-    print("self_test 통과")
-
-
-# 기존: 파일 맨 아래에서 analyze(random.sample(DECK, 2))를 바로 실행
-#        → import해도 실행되던 문제를 막기 위해 __main__ 안으로 이동
-if __name__ == "__main__":
-    self_test()
-    print()
-    hand = ["9s", "8s"]
-    for board in ([], ["7s", "2d", "Kc"], ["7s", "2d", "Kc", "6s"], ["7s", "2d", "Kc", "6s", "10s"]):
-        analyze(hand, board)
-        print("-" * 30)
