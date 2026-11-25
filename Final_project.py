@@ -540,16 +540,14 @@ with left:
 
     st.markdown(
         '<div class="section-title">'
-        '📷 포커 사진 업로드'
+        '📷 포커 사진 촬영'
         '</div>',
         unsafe_allow_html=True
     )
 
-    uploaded = st.file_uploader(
-        "카드가 보이는 사진을 선택하세요.",
-        type=["png", "jpg", "jpeg"],
-        accept_multiple_files=False,
-        key="card_photo_upload"
+    uploaded = st.camera_input(
+        "웹캠으로 포커 테이블을 촬영하세요.",
+        key="card_camera"
     )
 
     if uploaded is not None:
