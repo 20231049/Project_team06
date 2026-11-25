@@ -1,11 +1,12 @@
 
-import random
 from pathlib import Path
+from collections import deque, Counter
+from threading import Lock
 
 import cv2
 import numpy as np
 import streamlit as st
-from ultralytics import YOLO
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 
 import poker_equity as poker
 from poker_equity_web import (
@@ -14,479 +15,505 @@ from poker_equity_web import (
     get_hand_features,
     get_recommendation,
 )
+from ultralytics import YOLO
 
 
-# ==================================================
+# ============================================================
 # 1. 기본 설정
-# ==================================================
+# ============================================================
 
 ROOT = Path(__file__).resolve().parent
 ASSET_DIR = ROOT / "assets"
-
 MODEL_PATH = ROOT / "best.pt"
 
 CONFIDENCE = 0.25
-IMAGE_SIZE = 1280
+IMAGE_SIZE = 960
 IOU = 0.5
 
+# 화면 세로 좌표 기준
+# 이 값보다 위쪽에 있는 카드는 커뮤니티 카드,
+# 아래쪽에 있는 카드는 내 패로 분류합니다.
 DEFAULT_SPLIT_Y = 0.60
 
 DEFAULT_OPPONENTS = 1
 DEFAULT_TRIALS = 1400
 
+# 분석 주기: 0.6초
+ANALYSIS_INTERVAL = 0.6
 
-# ==================================================
-# 2. 카드 표시용 상수
-# ==================================================
+# 최근 인식 결과 중 같은 결과가 2번 이상 나오면 안정된 결과로 판단
+STABLE_HISTORY_SIZE = 5
+STABLE_MIN_COUNT = 2
 
 RANKS = ["2", "3", "4", "5", "6", "7", "8", "9",
          "10", "J", "Q", "K", "A"]
-
 SUITS = ["s", "h", "d", "c"]
 
-SUIT_SYMBOL = {
+SUIT_SYMBOLS = {
     "s": "♠",
     "h": "♥",
     "d": "♦",
-    "c": "♣"
+    "c": "♣",
 }
 
-SUIT_COLOR = {
-    "s": "#20252d",
-    "c": "#20252d",
-    "h": "#dc3545",
-    "d": "#dc3545"
+SUIT_COLORS = {
+    "s": "#222222",
+    "h": "#e53935",
+    "d": "#e53935",
+    "c": "#222222",
 }
 
-DECK = [
-    rank + suit
-    for rank in RANKS
-    for suit in SUITS
-]
+DECK = [rank + suit for rank in RANKS for suit in SUITS]
 
 
-# ==================================================
-# 3. Streamlit 페이지 설정
-# ==================================================
+# ============================================================
+# 2. Streamlit 설정
+# ============================================================
 
 st.set_page_config(
-    page_title="Poker Simulator | 승률 계산기",
-    page_icon="♠️",
+    page_title="Poker Simulator | 실시간 승률 분석",
+    page_icon="♠",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-
-# ==================================================
-# 4. 화면 스타일
-# ==================================================
-
 st.markdown("""
 <style>
-    @import url(
-        'https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap'
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'Noto Sans KR', sans-serif;
+}
+
+.main .block-container {
+    padding-top: 1.5rem;
+    padding-bottom: 2rem;
+    max-width: 1600px;
+}
+
+h1, h2, h3 {
+    font-weight: 800;
+}
+
+.panel {
+    background: #171b24;
+    border: 1px solid #303744;
+    border-radius: 14px;
+    padding: 18px;
+    margin-bottom: 14px;
+}
+
+.panel-title {
+    font-size: 19px;
+    font-weight: 800;
+    margin-bottom: 12px;
+}
+
+.card-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 9px;
+    align-items: center;
+    min-height: 110px;
+}
+
+.poker-card {
+    width: 67px;
+    height: 94px;
+    background: #ffffff;
+    border-radius: 9px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 7px;
+    box-sizing: border-box;
+    box-shadow: 0 3px 8px rgba(0,0,0,0.25);
+    font-weight: 800;
+}
+
+.card-rank {
+    font-size: 18px;
+    line-height: 20px;
+}
+
+.card-suit {
+    font-size: 31px;
+    text-align: center;
+    line-height: 35px;
+}
+
+.card-back {
+    width: 67px;
+    height: 94px;
+    border-radius: 9px;
+    background: repeating-linear-gradient(
+        45deg,
+        #193e78,
+        #193e78 5px,
+        #28599c 5px,
+        #28599c 10px
     );
+    border: 4px solid white;
+    box-sizing: border-box;
+}
 
-    html, body, [class*="css"] {
-        font-family: 'Noto Sans KR', sans-serif;
-    }
+.empty-card {
+    width: 67px;
+    height: 94px;
+    border: 2px dashed #596273;
+    border-radius: 9px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #8993a4;
+    font-size: 24px;
+}
 
-    .block-container {
-        max-width: 1500px;
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-    }
+.metric-box {
+    background: #202633;
+    border: 1px solid #394252;
+    border-radius: 12px;
+    padding: 15px;
+    text-align: center;
+}
 
-    h1 {
-        font-size: 2.05rem !important;
-        font-weight: 800 !important;
-        color: #202938;
-    }
+.metric-label {
+    color: #aeb8c8;
+    font-size: 13px;
+    margin-bottom: 5px;
+}
 
-    h2, h3 {
-        color: #202938;
-        font-weight: 750 !important;
-    }
+.metric-value {
+    font-size: 28px;
+    font-weight: 800;
+}
 
-    .subtitle {
-        color: #64748b;
-        font-size: .88rem;
-    }
+.advice-box {
+    background: #202633;
+    border-left: 5px solid #38bdf8;
+    border-radius: 9px;
+    padding: 15px;
+    margin-top: 10px;
+}
 
-    .section-title {
-        font-size: 1.22rem;
-        font-weight: 750;
-        color: #202938;
-        margin: .2rem 0 .65rem;
-    }
+.status-text {
+    color: #aeb8c8;
+    font-size: 13px;
+}
 
-    .hint {
-        background: #eef5ff;
-        border-radius: 9px;
-        padding: 13px 15px;
-        color: #2862b9;
-        font-size: .85rem;
-        line-height: 1.6;
-    }
+div[data-testid="stImage"] img {
+    border-radius: 10px;
+}
 
-    .metric-label {
-        color: #64748b;
-        font-size: .82rem;
-    }
-
-    .metric-value {
-        color: #182230;
-        font-size: 2.2rem;
-        font-weight: 750;
-    }
-
-    .advice {
-        background: #effaf5;
-        color: #08784d;
-        border-radius: 9px;
-        padding: 13px 15px;
-        font-weight: 650;
-        font-size: .9rem;
-    }
-
-    .grade {
-        color: #344054;
-        font-size: 1.05rem;
-        font-weight: 700;
-    }
-
-    .small-muted {
-        color: #98a2b3;
-        font-size: .75rem;
-    }
-
-    .playing-card {
-        width: 66px;
-        height: 96px;
-        border: 1px solid #d7dce2;
-        border-radius: 7px;
-        background: white;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-        padding: 7px;
-        font-size: 19px;
-    }
-
-    .playing-card span {
-        font-size: 30px;
-        align-self: center;
-    }
-
-    .card-back {
-        width: 66px;
-        height: 96px;
-        border-radius: 7px;
-        border: 2px solid white;
-        outline: 1px solid #ddd;
-        background: #d85a62;
-        color: white;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 34px;
-    }
-
-    hr {
-        border-color: #e5e7eb;
-    }
-
-    @media (max-width: 800px) {
-        .block-container {
-            padding: 1rem;
-        }
-
-        h1 {
-            font-size: 1.5rem !important;
-        }
-    }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ==================================================
-# 5. 카드 이미지 표시 함수
-# ==================================================
+# ============================================================
+# 3. 카드 이미지 출력
+# ============================================================
 
-def card_image_name(card):
-    return f"{card}.png"
+def render_card(card, width=67):
+    """카드 이미지 파일이 있으면 Streamlit 이미지로 출력합니다."""
 
+    image_path = ASSET_DIR / f"{card}.png"
 
-def render_card(card, width=78):
+    if image_path.exists():
+        st.image(str(image_path), width=width)
+        return
 
-    path = ASSET_DIR / card_image_name(card)
+    rank = card[:-1]
+    suit = card[-1]
+    symbol = SUIT_SYMBOLS.get(suit, "?")
+    color = SUIT_COLORS.get(suit, "#222222")
 
-    if path.exists():
-
-        st.image(str(path), width=width)
-
-    else:
-
-        suit = SUIT_SYMBOL[card[-1]]
-        color = SUIT_COLOR[card[-1]]
-
-        st.markdown(
-            f'<div class="playing-card" style="color:{color}">'
-            f'<b>{card[:-1]}</b><span>{suit}</span></div>',
-            unsafe_allow_html=True
-        )
-
-
-def render_back(width=78):
-
-    path = ASSET_DIR / "back.png"
-
-    if path.exists():
-
-        st.image(str(path), width=width)
-
-    else:
-
-        st.markdown(
-            '<div class="card-back">♠</div>',
-            unsafe_allow_html=True
-        )
+    st.markdown(
+        f"""
+        <div class="poker-card" style="width:{width}px;">
+            <div class="card-rank" style="color:{color};">{rank}</div>
+            <div class="card-suit" style="color:{color};">{symbol}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-def card_caption(card):
-    return f"{card[:-1]}{SUIT_SYMBOL[card[-1]]}"
+def render_cards(cards, empty_count=0):
+    """카드들을 가로로 배치합니다."""
+
+    items = list(cards) + [None] * empty_count
+
+    if not items:
+        return
+
+    columns = st.columns(len(items))
+
+    for column, card in zip(columns, items):
+        with column:
+            if card is not None:
+                render_card(card)
+            else:
+                st.markdown(
+                    '<div class="empty-card">?</div>',
+                    unsafe_allow_html=True,
+                )
 
 
-# ==================================================
-# 6. YOLO 모델 불러오기
-# ==================================================
+def render_card_back(count=2):
+    """카드 뒷면 이미지를 출력합니다."""
+
+    image_path = ASSET_DIR / "back.png"
+    columns = st.columns(count)
+
+    for column in columns:
+        with column:
+            if image_path.exists():
+                st.image(str(image_path), width=67)
+            else:
+                st.markdown(
+                    '<div class="card-back"></div>',
+                    unsafe_allow_html=True,
+                )
+
+
+# ============================================================
+# 4. YOLO 모델 로딩
+# ============================================================
 
 @st.cache_resource
 def load_model():
-
     if not MODEL_PATH.exists():
-
         raise FileNotFoundError(
             f"YOLO 모델 파일을 찾을 수 없습니다: {MODEL_PATH}"
         )
 
-    model = YOLO(str(MODEL_PATH))
-
-    return model
+    return YOLO(str(MODEL_PATH))
 
 
-# ==================================================
-# 7. 세로 기준선 그리기
-# ==================================================
+# ============================================================
+# 5. 웹캠 영상 처리
+# ============================================================
 
-def draw_split_line(image, split_y):
+class PokerVideoProcessor(VideoProcessorBase):
+    """
+    웹캠 영상은 그대로 반환합니다.
 
-    height, width = image.shape[:2]
+    YOLO를 여기서 실행하지 않습니다.
+    최신 프레임만 저장하고 오른쪽 분석 영역에서 가져갑니다.
+    """
 
-    split_pixel = int(height * split_y)
+    def __init__(self):
+        self.lock = Lock()
+        self.latest_frame = None
+        self.frame_count = 0
 
-    # 기준선
-    cv2.line(
-        image,
-        (0, split_pixel),
-        (width, split_pixel),
-        (0, 0, 255),
-        3
-    )
+    def recv(self, frame):
+        image = frame.to_ndarray(format="bgr24")
 
-    # 영역 이름
-    cv2.putText(
-        image,
-        "BOARD AREA",
-        (20, 40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1,
-        (255, 0, 0),
-        2
-    )
+        with self.lock:
+            self.latest_frame = image.copy()
+            self.frame_count += 1
 
-    cv2.putText(
-        image,
-        "HAND AREA",
-        (20, split_pixel + 40),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1,
-        (0, 165, 255),
-        2
-    )
+        # 원본 프레임을 그대로 반환
+        return frame
 
-    return image
+    def get_latest_frame(self):
+        with self.lock:
+            if self.latest_frame is None:
+                return None, self.frame_count
+
+            return self.latest_frame.copy(), self.frame_count
 
 
-# ==================================================
-# 8. 같은 카드 중복 검출 제거
-# ==================================================
+# ============================================================
+# 6. 카드 인식
+# ============================================================
 
-def remove_duplicates(cards):
+def remove_duplicates(detections):
+    """
+    같은 카드가 여러 번 검출되면 confidence가 높은 것만 남깁니다.
 
-    best_cards = {}
+    detections:
+        [(card_name, confidence, cx), ...]
+    """
 
-    for card in cards:
+    best = {}
 
-        name = card["name"]
+    for card, confidence, cx in detections:
+        if card not in best or confidence > best[card][0]:
+            best[card] = (confidence, cx)
 
-        if (
-            name not in best_cards
-            or card["confidence"] >
-            best_cards[name]["confidence"]
-        ):
+    result = []
 
-            best_cards[name] = card
+    for card, (confidence, cx) in best.items():
+        result.append((card, confidence, cx))
 
-    # 왼쪽에서 오른쪽 순서로 정렬
-    return sorted(
-        best_cards.values(),
-        key=lambda card: card["cx"]
-    )
+    result.sort(key=lambda x: x[2])
+
+    return result
 
 
-# ==================================================
-# 9. YOLO 카드 인식 및 세로 좌표 분류
-# ==================================================
+def detect_cards(model, image, split_y, confidence_threshold=CONFIDENCE):
+    """
+    YOLO로 카드를 검출하고 세로 위치만으로 구분합니다.
 
-def detect_cards(model, image, split_y):
+    cy < split_y : 커뮤니티 카드
+    cy >= split_y: 내 카드
+    """
 
     height, width = image.shape[:2]
 
     results = model.predict(
         source=image,
         imgsz=IMAGE_SIZE,
-        conf=CONFIDENCE,
+        conf=confidence_threshold,
         iou=IOU,
-        verbose=False
+        verbose=False,
     )
 
-    hand_cards = []
-    board_cards = []
+    hand_detections = []
+    board_detections = []
 
-    debug_image = draw_split_line(
-        image.copy(),
-        split_y
-    )
+    debug_image = image.copy()
 
     for result in results:
+        if result.boxes is None:
+            continue
 
         for box in result.boxes:
+            xyxy = box.xyxy[0].cpu().numpy()
+            confidence = float(box.conf[0].cpu().numpy())
+            class_id = int(box.cls[0].cpu().numpy())
 
-            # 클래스 번호
-            class_id = int(box.cls[0].item())
+            x1, y1, x2, y2 = map(int, xyxy)
 
-            # 카드 클래스 이름
-            raw_name = result.names[class_id]
+            class_name = model.names[class_id]
+            card_name = poker.norm(str(class_name))
 
-            # poker_equity.py 표기법으로 변환
-            card_name = poker.norm(raw_name)
+            if card_name not in DECK:
+                continue
 
-            # 신뢰도
-            confidence = float(box.conf[0].item())
-
-            # 바운딩 박스
-            x1, y1, x2, y2 = box.xyxy[0].tolist()
-
-            # 카드 중심 좌표
-            center_x = (x1 + x2) / 2
-            center_y = (y1 + y2) / 2
-
-            # 세로 비율 좌표
-            cy = center_y / height
-
-            # 가로 좌표는 표시 및 정렬용
-            cx = center_x / width
-
-            # 카드 정보
-            card = {
-                "name": card_name,
-                "confidence": confidence,
-                "cx": cx,
-                "cy": cy
-            }
-
-            # --------------------------------
-            # 세로 좌표만으로 분류
-            # --------------------------------
+            cx = (x1 + x2) / 2
+            cy = ((y1 + y2) / 2) / height
 
             if cy < split_y:
-
-                board_cards.append(card)
-                color = (255, 0, 0)
-
+                board_detections.append(
+                    (card_name, confidence, cx)
+                )
+                box_color = (0, 200, 255)
+                label = f"BOARD {card_name}"
             else:
+                hand_detections.append(
+                    (card_name, confidence, cx)
+                )
+                box_color = (0, 255, 100)
+                label = f"HAND {card_name}"
 
-                hand_cards.append(card)
-                color = (0, 165, 255)
-
-            # 바운딩 박스 표시
             cv2.rectangle(
                 debug_image,
-                (int(x1), int(y1)),
-                (int(x2), int(y2)),
-                color,
-                2
+                (x1, y1),
+                (x2, y2),
+                box_color,
+                2,
             )
 
-            # 카드 이름 및 신뢰도 표시
             cv2.putText(
                 debug_image,
-                f"{card_name} {confidence:.2f}",
-                (int(x1), max(int(y1) - 10, 20)),
+                f"{label} {confidence:.2f}",
+                (x1, max(20, y1 - 8)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                color,
-                2
+                0.6,
+                box_color,
+                2,
             )
 
-    # 중복 제거
-    hand_cards = remove_duplicates(hand_cards)
-    board_cards = remove_duplicates(board_cards)
+    # 세로 분할선
+    split_pixel = int(height * split_y)
 
-    hand_names = [
-        card["name"] for card in hand_cards
-    ]
+    cv2.line(
+        debug_image,
+        (0, split_pixel),
+        (width, split_pixel),
+        (0, 0, 255),
+        2,
+    )
 
-    board_names = [
-        card["name"] for card in board_cards
-    ]
+    cv2.putText(
+        debug_image,
+        "COMMUNITY CARDS",
+        (10, max(25, split_pixel - 12)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 200, 255),
+        2,
+    )
 
-    return hand_names, board_names, debug_image
+    cv2.putText(
+        debug_image,
+        "MY HAND",
+        (10, min(height - 10, split_pixel + 30)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 100),
+        2,
+    )
+
+    hand_detections = remove_duplicates(hand_detections)
+    board_detections = remove_duplicates(board_detections)
+
+    hand_cards = [item[0] for item in hand_detections]
+    board_cards = [item[0] for item in board_detections]
+
+    return hand_cards, board_cards, debug_image
 
 
-# ==================================================
-# 10. 카드 개수 및 중복 검사
-# ==================================================
+# ============================================================
+# 7. 카드 인식 결과 안정화
+# ============================================================
+
+def get_stable_cards(history):
+    """
+    최근 인식 결과 중 반복해서 나타나는 카드 구성을 반환합니다.
+
+    안정된 결과가 없으면 None을 반환합니다.
+    빈 카드 구성도 정상적인 인식 결과로 취급합니다.
+    """
+
+    if not history:
+        return None
+
+    counts = Counter(history)
+
+    stable_result, count = counts.most_common(1)[0]
+
+    if count < STABLE_MIN_COUNT:
+        return None
+
+    return stable_result
+
+
+# ============================================================
+# 8. 카드 유효성 검사
+# ============================================================
 
 def validate_cards(hand_cards, board_cards):
-
     if len(hand_cards) != 2:
-
-        raise ValueError(
-            f"내 카드가 2장이 아닙니다. "
-            f"현재 {len(hand_cards)}장 인식"
-        )
+        return False, "내 카드는 정확히 2장이 인식되어야 합니다."
 
     if len(board_cards) not in [0, 3, 4, 5]:
-
-        raise ValueError(
-            f"커뮤니티 카드 개수가 올바르지 않습니다. "
-            f"현재 {len(board_cards)}장 인식"
-        )
+        return False, "커뮤니티 카드는 0장, 3장, 4장, 5장이어야 합니다."
 
     all_cards = hand_cards + board_cards
 
-    if len(set(all_cards)) != len(all_cards):
+    if len(all_cards) != len(set(all_cards)):
+        return False, "같은 카드가 중복으로 인식되었습니다."
 
-        raise ValueError(
-            "동일한 카드가 중복 인식되었습니다."
-        )
+    return True, "카드 인식 완료"
 
 
-# ==================================================
-# 11. 세션 상태
-# ==================================================
+# ============================================================
+# 9. 세션 상태 초기화
+# ============================================================
 
 if "hand_cards" not in st.session_state:
     st.session_state.hand_cards = []
@@ -500,381 +527,407 @@ if "debug_image" not in st.session_state:
 if "analysis_result" not in st.session_state:
     st.session_state.analysis_result = None
 
-if "opponents" not in st.session_state:
-    st.session_state.opponents = DEFAULT_OPPONENTS
-
-
-# ==================================================
-# 12. 헤더
-# ==================================================
-
-st.markdown(
-    "# ♠ Poker Simulator (승률 계산기)"
-)
-
-st.markdown(
-    '<div class="subtitle">'
-    'YOLO 카드 인식과 텍사스 홀덤 승률 분석을 결합한 프로그램입니다.'
-    '</div>',
-    unsafe_allow_html=True
-)
-
-st.markdown("---")
-
-
-# ==================================================
-# 13. 화면 구성
-# ==================================================
-
-left, right = st.columns(
-    [0.9, 1.1],
-    gap="large"
-)
-
-
-# ==================================================
-# 14. 왼쪽: 사진 업로드 및 YOLO 설정
-# ==================================================
-
-with left:
-
-    st.markdown(
-        '<div class="section-title">'
-        '📷 포커 사진 촬영'
-        '</div>',
-        unsafe_allow_html=True
+if "card_history" not in st.session_state:
+    st.session_state.card_history = deque(
+        maxlen=STABLE_HISTORY_SIZE
     )
 
+if "last_frame_count" not in st.session_state:
+    st.session_state.last_frame_count = -1
+
+if "last_analysis_key" not in st.session_state:
+    st.session_state.last_analysis_key = None
+
+if "last_detect_status" not in st.session_state:
+    st.session_state.last_detect_status = "웹캠 연결을 기다리는 중입니다."
+
+
+# ============================================================
+# 10. 화면 제목
+# ============================================================
+
+st.title("♠ Texas Hold'em Poker Simulator")
+st.caption("실시간 카드 인식 및 승률 분석 시스템")
+
+st.divider()
+
+
+# ============================================================
+# 11. 화면 레이아웃
+# ============================================================
+
+left_col, right_col = st.columns(
+    [1.15, 1],
+    gap="large",
+)
+
+
+# ============================================================
+# 12. 왼쪽: 실시간 웹캠
+# ============================================================
+
+with left_col:
+
+    st.subheader("📷 실시간 웹캠")
+
+    st.markdown(
+<<<<<<< HEAD
+        '<div class="section-title">'
+        '📷 포커 사진 촬영'
+=======
+        '<div class="status-text">'
+        '웹캠 영상은 YOLO 분석과 분리되어 실시간으로 출력됩니다.'
+>>>>>>> upstream/main
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+<<<<<<< HEAD
     uploaded = st.camera_input(
         "웹캠으로 포커 테이블을 촬영하세요.",
         key="card_camera"
+=======
+    rtc_configuration = RTCConfiguration({
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]}
+        ]
+    })
+
+    ctx = webrtc_streamer(
+        key="poker-webcam",
+        video_processor_factory=PokerVideoProcessor,
+        rtc_configuration=rtc_configuration,
+        media_stream_constraints={
+            "video": {
+                "width": {"ideal": 1280},
+                "height": {"ideal": 720},
+                "frameRate": {"ideal": 30, "max": 30},
+            },
+            "audio": False,
+        },
+        async_processing=True,
+>>>>>>> upstream/main
     )
 
-    if uploaded is not None:
-
-        file_bytes = np.frombuffer(
-            uploaded.getvalue(),
-            np.uint8
-        )
-
-        image = cv2.imdecode(
-            file_bytes,
-            cv2.IMREAD_COLOR
-        )
-
-        if image is not None:
-
-            rgb_image = cv2.cvtColor(
-                image,
-                cv2.COLOR_BGR2RGB
-            )
-
-            st.image(
-                rgb_image,
-                caption="업로드한 포커 사진",
-                use_container_width=True
-            )
-
-            st.caption(
-                f"사진 해상도: {image.shape[1]} × {image.shape[0]}"
-            )
-
-            st.markdown("---")
-
-            # 세로 기준선 조절
-            st.markdown(
-                '<div class="section-title">'
-                '📏 카드 분류 기준선'
-                '</div>',
-                unsafe_allow_html=True
-            )
-
-            split_y = st.slider(
-                "기준선 위치 (%)",
-                min_value=30,
-                max_value=85,
-                value=int(DEFAULT_SPLIT_Y * 100),
-                step=1
-            )
-
-            split_y = split_y / 100
-
-            st.info(
-                f"현재 기준선: 사진 높이의 {split_y:.0%}\n\n"
-                "기준선 위쪽은 커뮤니티 카드, "
-                "아래쪽은 내 카드로 분류합니다."
-            )
-
-            # YOLO 실행
-            if st.button(
-                "🔍 YOLO 카드 인식 시작",
-                use_container_width=True,
-                type="primary"
-            ):
-
-                try:
-
-                    with st.spinner(
-                        "YOLO가 카드를 인식하고 있습니다..."
-                    ):
-
-                        model = load_model()
-
-                        hand, board, debug = detect_cards(
-                            model,
-                            image,
-                            split_y
-                        )
-
-                        st.session_state.hand_cards = hand
-                        st.session_state.board_cards = board
-                        st.session_state.debug_image = debug
-
-                        # 새로운 인식 결과이므로 이전 분석 결과 초기화
-                        st.session_state.analysis_result = None
-
-                    st.success("카드 인식이 완료되었습니다.")
-
-                except Exception as e:
-
-                    st.error(f"인식 오류: {e}")
-
-        else:
-
-            st.error("이미지를 읽을 수 없습니다.")
-
-    else:
-
-        st.info("포커 사진을 업로드하면 YOLO 카드 인식을 시작할 수 있습니다.")
-
-
-# ==================================================
-# 15. 오른쪽: 카드 및 승률 분석
-# ==================================================
-
-with right:
-
-    st.markdown(
-        '<div class="section-title">🎴 인식된 카드</div>',
-        unsafe_allow_html=True
+    st.caption(
+        "웹캠 시작 버튼을 눌러 카메라를 연결하세요. "
+        "브라우저에서 카메라 사용 권한을 허용해야 합니다."
     )
 
-    hand = st.session_state.hand_cards
-    board = st.session_state.board_cards
+    st.markdown("### 카메라 배치 안내")
 
-    # ----------------------------------------------
-    # 내 카드 표시
-    # ----------------------------------------------
+    st.markdown("""
+    - 화면 위쪽: 커뮤니티 카드
+    - 화면 아래쪽: 내 카드
+    - 카드가 서로 겹치지 않도록 배치
+    - 카메라가 테이블을 내려다보도록 고정
+    """)
 
-    st.markdown("**내 카드**")
+    split_y = st.slider(
+        "카드 영역 세로 분할 위치",
+        min_value=0.20,
+        max_value=0.90,
+        value=DEFAULT_SPLIT_Y,
+        step=0.01,
+        help="이 위치보다 위쪽은 커뮤니티 카드, 아래쪽은 내 카드로 인식합니다.",
+    )
 
-    if hand:
+    st.markdown("### YOLO 인식 설정")
 
-        cols = st.columns(2)
-
-        for i, card in enumerate(hand):
-
-            with cols[i]:
-
-                render_card(card, 78)
-                st.caption(card_caption(card))
-
-    else:
-
-        st.caption("인식된 내 카드가 없습니다.")
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ----------------------------------------------
-    # 커뮤니티 카드 표시
-    # ----------------------------------------------
-
-    st.markdown("**커뮤니티 카드**")
-
-    board_cols = st.columns(5)
-
-    for i, col in enumerate(board_cols):
-
-        with col:
-
-            if i < len(board):
-
-                render_card(board[i], 70)
-                st.caption(card_caption(board[i]))
-
-            else:
-
-                render_back(70)
-                st.caption("미공개")
-
-    st.markdown("---")
-
-    # ----------------------------------------------
-    # YOLO 디버깅 이미지
-    # ----------------------------------------------
-
-    if st.session_state.debug_image is not None:
-
-        with st.expander("YOLO 인식 및 기준선 확인"):
-
-            debug_rgb = cv2.cvtColor(
-                st.session_state.debug_image,
-                cv2.COLOR_BGR2RGB
-            )
-
-            st.image(
-                debug_rgb,
-                caption="빨간색: 기준선 / 파란색: 커뮤니티 / 주황색: 내 카드",
-                use_container_width=True
-            )
-
-    # ----------------------------------------------
-    # 상대 플레이어 수
-    # ----------------------------------------------
+    confidence = st.slider(
+        "인식 신뢰도",
+        min_value=0.10,
+        max_value=0.90,
+        value=CONFIDENCE,
+        step=0.05,
+    )
 
     opponents = st.slider(
         "상대 플레이어 수",
         min_value=1,
         max_value=9,
-        value=int(st.session_state.opponents)
+        value=DEFAULT_OPPONENTS,
     )
 
-    st.session_state.opponents = opponents
-
-    st.caption(
-        "상대방의 카드는 남은 카드에서 무작위로 생성합니다."
+    trials = st.select_slider(
+        "승률 계산 반복 횟수",
+        options=[300, 500, 800, 1000, 1400, 2000, 3000],
+        value=DEFAULT_TRIALS,
     )
 
-    # ----------------------------------------------
-    # 승률 계산 버튼
-    # ----------------------------------------------
 
-    if st.button(
-        "📊 포커 승률 계산",
-        use_container_width=True,
-        type="primary"
-    ):
+# ============================================================
+# 13. 오른쪽: 카드 인식 및 승률 분석
+# ============================================================
 
-        try:
+with right_col:
 
-            validate_cards(hand, board)
+    st.subheader("🃏 카드 인식 및 승률 분석")
 
-            with st.spinner("승률 계산 중..."):
+    @st.fragment(run_every=ANALYSIS_INTERVAL)
+    def analysis_panel():
 
+        # ----------------------------------------------------
+        # A. 웹캠 연결 확인
+        # ----------------------------------------------------
+
+        if not ctx.state.playing:
+            st.info("웹캠을 시작하면 카드 인식이 자동으로 진행됩니다.")
+            return
+
+        processor = ctx.video_processor
+
+        if processor is None:
+            st.warning("웹캠 프로세서를 초기화하는 중입니다.")
+            return
+
+        frame, frame_count = processor.get_latest_frame()
+
+        if frame is None:
+            st.info("웹캠 프레임을 기다리는 중입니다.")
+            return
+
+        # 같은 프레임이면 YOLO를 다시 실행하지 않음
+        if frame_count == st.session_state.last_frame_count:
+            st.caption("새로운 카메라 프레임을 기다리는 중입니다.")
+        else:
+            st.session_state.last_frame_count = frame_count
+
+            try:
+                model = load_model()
+
+                # ------------------------------------------------
+                # B. YOLO 카드 인식
+                # ------------------------------------------------
+
+                hand, board, debug = detect_cards(
+                    model,
+                    frame,
+                    split_y,
+                    confidence_threshold=confidence,
+                )       
+
+
+                st.session_state.debug_image = debug
+
+                st.session_state.card_history.append(
+                    (tuple(hand), tuple(board))
+                )
+
+                stable_result = get_stable_cards(
+                    st.session_state.card_history
+                )
+
+                if stable_result is not None:
+                    stable_hand, stable_board = stable_result
+
+                st.session_state.hand_cards = list(stable_hand)
+                st.session_state.board_cards = list(stable_board)
+
+                st.session_state.last_detect_status = (
+                    f"최근 프레임 인식: 내 카드 {len(hand)}장 / "
+                    f"커뮤니티 카드 {len(board)}장"
+                )
+
+            except Exception as e:
+                st.error(f"카드 인식 중 오류가 발생했습니다: {e}")
+                return
+
+        # ----------------------------------------------------
+        # C. 현재 카드 표시
+        # ----------------------------------------------------
+
+        hand_cards = st.session_state.hand_cards
+        board_cards = st.session_state.board_cards
+
+        st.markdown("#### 내 카드")
+
+        if hand_cards:
+            render_cards(hand_cards, max(0, 2 - len(hand_cards)))
+        else:
+            render_card_back(2)
+
+        st.markdown("#### 커뮤니티 카드")
+
+        render_cards(
+            board_cards,
+            max(0, 5 - len(board_cards)),
+        )
+
+        st.caption(st.session_state.last_detect_status)
+
+        # ----------------------------------------------------
+        # D. YOLO 디버그 화면
+        # ----------------------------------------------------
+
+        with st.expander("YOLO 카드 인식 결과 확인", expanded=False):
+
+            if st.session_state.debug_image is not None:
+                debug_rgb = cv2.cvtColor(
+                    st.session_state.debug_image,
+                    cv2.COLOR_BGR2RGB,
+                )
+
+                st.image(
+                    debug_rgb,
+                    caption="카드 검출 박스 및 세로 분할선",
+                    use_container_width=True,
+                )
+
+        # ----------------------------------------------------
+        # E. 카드 유효성 검사
+        # ----------------------------------------------------
+
+        valid, message = validate_cards(
+            hand_cards,
+            board_cards,
+        )
+
+        if not valid:
+            st.warning(message)
+            st.session_state.analysis_result = None
+            st.session_state.last_analysis_key = None
+            return
+
+        st.success(message)
+
+        # ----------------------------------------------------
+        # F. 승률 분석
+        # ----------------------------------------------------
+
+        analysis_key = (
+            tuple(hand_cards),
+            tuple(board_cards),
+            opponents,
+            trials,
+        )
+
+        if analysis_key != st.session_state.last_analysis_key:
+
+            try:
                 equity = estimate_equity(
-                    hand,
-                    board,
+                    hand_cards,
+                    board_cards,
                     opponents=opponents,
-                    trials=DEFAULT_TRIALS
+                    trials=trials,
                 )
 
                 current_hand = evaluate_visible_hand(
-                    hand,
-                    board
+                    hand_cards,
+                    board_cards,
                 )
 
                 grade, advice_text = get_recommendation(
                     equity,
-                    opponents
+                    opponents,
                 )
 
-                hand_features = get_hand_features(hand)
+                hand_features = get_hand_features(hand_cards)
 
                 st.session_state.analysis_result = {
                     "equity": equity,
                     "current_hand": current_hand,
                     "grade": grade,
-                    "advice": advice_text,
-                    "features": hand_features
+                    "advice_text": advice_text,
+                    "hand_features": hand_features,
                 }
 
-        except Exception as e:
+                st.session_state.last_analysis_key = analysis_key
 
-            st.session_state.analysis_result = None
+            except Exception as e:
+                st.error(f"승률 계산 중 오류가 발생했습니다: {e}")
+                return
 
-            st.error(f"분석할 수 없습니다: {e}")
+        result = st.session_state.analysis_result
 
-    # ----------------------------------------------
-    # 분석 결과 표시
-    # ----------------------------------------------
+        if result is None:
+            st.info("카드 인식 후 승률 분석이 진행됩니다.")
+            return
 
-    result = st.session_state.analysis_result
+        # ----------------------------------------------------
+        # G. 승률 결과 출력
+        # ----------------------------------------------------
 
-    if result is not None:
-
-        st.markdown("---")
-
-        st.markdown(
-            '<div class="section-title">승리 확률</div>',
-            unsafe_allow_html=True
-        )
+        st.markdown("#### 📊 승률 분석 결과")
 
         equity = result["equity"]
 
-        st.markdown(
-            '<div class="metric-label">'
-            '예상 승률 (무승부는 0.5승 반영)'
-            '</div>',
-            unsafe_allow_html=True
-        )
+        metric_col1, metric_col2 = st.columns(2)
+
+        with metric_col1:
+            st.markdown(
+                f"""
+                <div class="metric-box">
+                    <div class="metric-label">예상 승률</div>
+                    <div class="metric-value" style="color:#38bdf8;">
+                        {equity:.1%}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        with metric_col2:
+            st.markdown(
+                f"""
+                <div class="metric-box">
+                    <div class="metric-label">추천 등급</div>
+                    <div class="metric-value">
+                        {result["grade"]}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # ----------------------------------------------------
+        # H. 현재 핸드 및 특징
+        # ----------------------------------------------------
+
+        st.markdown("#### 현재 핸드")
+
+        st.write(result["current_hand"])
+
+        st.markdown("#### 내 카드 특징")
+
+        st.write(result["hand_features"])
+
+        # ----------------------------------------------------
+        # I. 행동 추천
+        # ----------------------------------------------------
+
+        st.markdown("#### 💡 추천 행동")
 
         st.markdown(
-            f'<div class="metric-value">{equity:.1%}</div>',
-            unsafe_allow_html=True
-        )
-
-        st.progress(
-            float(max(0.0, min(1.0, equity)))
+            f"""
+            <div class="advice-box">
+                {result["advice_text"]}
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
         st.caption(
-            f"{opponents}명 상대 · "
-            f"몬테카를로 시뮬레이션 {DEFAULT_TRIALS:,}회"
-        )
-
-        # 족보 및 카드 평가
-        st.markdown("---")
-
-        st.markdown("**내 카드 평가**")
-
-        st.markdown(
-            f'<div class="grade">{result["grade"]}</div>',
-            unsafe_allow_html=True
+            f"상대 플레이어: {opponents}명 · "
+            f"시뮬레이션: {trials:,}회"
         )
 
         st.caption(
-            f"카드 특징: {result['features']}"
+            "승률은 현재 인식된 카드와 설정된 상대 수를 기준으로 "
+            "몬테카를로 방식으로 추정한 값입니다."
         )
 
-        st.caption(
-            f"현재 족보: {result['current_hand']}"
-        )
-
-        # 추천 행동
-        st.markdown(
-            '<div class="section-title">추천 행동</div>',
-            unsafe_allow_html=True
-        )
-
-        st.markdown(
-            f'<div class="advice">👉 {result["advice"]}</div>',
-            unsafe_allow_html=True
-        )
+    analysis_panel()
 
 
-# ==================================================
-# 16. 하단 안내
-# ==================================================
+# ============================================================
+# 14. 하단 안내
+# ============================================================
 
-st.markdown("---")
+st.divider()
 
-st.caption(
-    "※ 승률은 YOLO가 인식한 내 카드와 공개된 커뮤니티 카드를 "
-    "기반으로 계산합니다. "
-    "상대 카드 및 남은 커뮤니티 카드는 무작위로 생성합니다."
-)
-
-st.caption(
-    "※ 본 프로그램은 확률 기반 의사결정 보조 도구이며, "
-    "실제 게임 결과를 보장하지 않습니다."
-)
+st.caption("""
+주의: 이 프로그램은 카드 인식 및 확률 추정을 위한 프로젝트입니다.
+카드 인식 결과가 실제 테이블 상황과 다를 수 있으므로
+승률 분석 전에 YOLO 인식 결과를 확인하세요.
+""")
